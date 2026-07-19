@@ -1,83 +1,122 @@
-# Bunny Stream → Cloudflare R2 Uploader
+# Bunny Stream → Cloudflare R2 Uploader (+ Telegram bot)
 
 Web app: PC se video upload karo (drag & drop, multi-file, ya poori folder) →
-har video Bunny Stream par upload hoke transcode hota hai → transcode ke baad
-uske saare HLS files (playlist.m3u8 + resolution playlists + .ts segments)
-download hoke Cloudflare R2 bucket me same folder structure me upload ho jaate
-hain.
+har video Bunny Stream par upload hoke transcode hota hai → uske baad Bunny
+ke "Download" button jo `data.zip` deta hai wahi zip Storage API se fetch
+karke unzip kiya jaata hai → saari files (HLS playlist + segments, MP4
+fallbacks, thumbnails) Cloudflare R2 me same structure me upload ho jaati
+hain → MongoDB me title/size/thumbnail/mp4/hls links ek unique `mapping`
+code ke saath save hote hain (streaming ke liye) → thumbnail ek Telegram
+channel me `STREAMING_LINK_BASE/{mapping}` caption ke saath post ho jaata
+hai.
+
+Ek Telegram **bot** (`bot.py`) bhi hai — usko DM me video bhejo, wo bhi
+same pipeline se guzarta hai.
+
+## Kya fix hua is version me
+Pehle wala version Bunny ke **pull-zone HLS URL** (`.../playlist.m3u8`) ko
+directly crawl karta tha — ye token authentication ya propagation delay ki
+wajah se fail ho sakta hai. Ab hum Bunny ke **Edge Storage API** se seedha
+`data.zip` download karte hain (bilkul wahi zip jo dashboard ke "Download"
+button se milta hai), unzip karte hain, aur unzip ki hui files R2 me upload
+karte hain. Ye zyada reliable hai.
 
 ## Features
-- Drag & drop upload zone (files ya poori folder, dono support)
-- Multiple files ek saath queue ho jaate hain (2 parallel process hote hain by default)
-- Per-file progress bar with stage (`Uploading to Bunny → Transcoding → Downloading HLS → Uploading to R2 → Done`)
-- `/health` and `/ping` routes + built-in self-ping loop (`health_check.py`) so the
-  Koyeb free-tier instance doesn't sleep
-- Dockerfile ready for Koyeb deploy
+- Drag & drop upload zone — files ya poori folder, dono support, multiple files ek saath queue
+- Upload (client → server) turant "complete" dikhta hai; baaki sab
+  (Bunny upload → transcode wait → zip download → unzip → R2 upload → Mongo
+  save → Telegram post) background me hota hai
+- Har job ka status **History** panel me hamesha ke liye dikhta hai (`/api/jobs`)
+  — page refresh karne par bhi status/streaming-link dikhta rahega
+- MongoDB me har video ka record: title, size, thumbnail URL, per-resolution
+  MP4 URLs, HLS playlist URL, aur ek unique `mapping` code
+- Naye video ka thumbnail Telegram channel me `STREAMING_LINK_BASE/{mapping}`
+  link ke saath post hota hai
+- `bot.py` — Telegram bot jo DM me bheja gaya video download karke isi
+  pipeline se guzarta hai; sirf `/start` command; sirf video files accept
+  karta hai (photo/GIF reject); download complete hote hi original DM
+  message delete kar deta hai
+- `/health`, `/ping` + self-ping loop (`health_check.py`) — Koyeb free tier
+  sleep nahi hoga
+- Dono services (`app.py` web app, `bot.py` bot) ke liye alag Dockerfile
 
 ## Project layout
 ```
-app.py              Flask app, upload endpoint, job orchestration
-bunny_client.py      Bunny Stream API (create/upload/poll)
-hls_downloader.py     Downloads generated HLS tree (m3u8 + segments)
-r2_client.py          Uploads files to Cloudflare R2 (boto3/S3 API)
-health_check.py       /health, /ping + self-ping background thread
-templates/index.html  Upload UI
-static/script.js       Drag/drop, folder traversal, XHR upload + polling
-static/style.css       Styling
-Dockerfile
+app.py                 Flask app — upload endpoint, job history, /api/video/<mapping>
+bot.py                  Telegram bot (Pyrogram) — DM video intake
+pipeline.py             Shared migration pipeline used by both app.py and bot.py
+bunny_client.py         Bunny Stream API (create/upload/poll transcode)
+bunny_storage_zip.py    Downloads + extracts the Bunny "data.zip" via Storage API
+r2_client.py            Uploads files to Cloudflare R2 (boto3/S3 API)
+mongo_client.py         Saves video records + generates the unique mapping code
+telegram_notify.py      Posts thumbnail + streaming link to a Telegram channel
+health_check.py         /health, /ping + self-ping background thread
+templates/index.html    Upload UI (queue + history)
+static/script.js        Drag/drop, folder traversal, XHR upload + polling + history panel
+static/style.css        Styling
+Dockerfile               Deploy app.py
+Dockerfile.bot           Deploy bot.py
 requirements.txt
 .env.example
 ```
 
 ## 1. Environment variables
 
-Copy `.env.example` to `.env` locally, ya Koyeb dashboard me "Environment
-variables" section me set karo:
+Sab kuch `.env.example` me hai. Sabse zaroori:
 
-| Variable | Description |
+| Variable | Kya hai |
 |---|---|
-| `BUNNY_LIBRARY_ID` | Bunny Stream video library ID |
-| `BUNNY_API_KEY` | Library ka API key (Bunny dashboard → Stream → your library → API) |
-| `BUNNY_PULL_ZONE_HOSTNAME` | Pull zone hostname jaha se HLS serve hota hai, e.g. `vz-xxxxxxxx-xxx.b-cdn.net` (library settings me milega) |
-| `R2_ACCOUNT_ID` | Cloudflare account ID |
-| `R2_ACCESS_KEY_ID` / `R2_SECRET_ACCESS_KEY` | R2 API token (Cloudflare dashboard → R2 → Manage API Tokens) |
-| `R2_BUCKET_NAME` | Target R2 bucket name |
-| `R2_KEY_PREFIX` | (optional) sab uploads ek folder prefix ke andar daalne ke liye |
-| `MAX_CONCURRENT_JOBS` | Ek saath kitne videos process honge (default 2) |
-| `DELETE_LOCAL_AFTER_UPLOAD` | Local temp files cleanup karo ya nahi (default true) |
-| `DELETE_FROM_BUNNY_AFTER_SUCCESS` | R2 upload success hone ke baad Bunny se video delete karo ya nahi (default false) |
-| `SELF_URL` | Apna Koyeb public URL, e.g. `https://your-app.koyeb.app` — self-ping ke liye |
-| `SELF_PING_INTERVAL` | Seconds (default 240 = 4 min) |
-| `SELF_PING_ENABLED` | `true`/`false` |
+| `BUNNY_LIBRARY_ID` / `BUNNY_API_KEY` | Stream library aur uska API key |
+| `BUNNY_STORAGE_ZONE_NAME` / `BUNNY_STORAGE_PASSWORD` | Library se linked Storage Zone ka naam + password (dashboard -> Stream library -> linked storage zone -> "FTP & API Access") — **ye Stream API key se alag hai**, zip download isi se hota hai |
+| `R2_ACCOUNT_ID`, `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY`, `R2_BUCKET_NAME` | R2 credentials |
+| `R2_PUBLIC_BASE_URL` | Bucket ka public URL (r2.dev ya custom domain) — Mongo/Telegram links banane ke liye zaroori |
+| `MONGODB_URI` | MongoDB connection string |
+| `STREAMING_LINK_BASE` | e.g. `https://mydomain.com` — final link `STREAMING_LINK_BASE/{mapping}` banta hai |
+| `TELEGRAM_BOT_TOKEN` / `TELEGRAM_CHANNEL_ID` | Channel me thumbnail post karne ke liye |
+| `TELEGRAM_API_ID` / `TELEGRAM_API_HASH` | Sirf `bot.py` (DM intake) ke liye — [my.telegram.org](https://my.telegram.org) se milega |
+| `SELF_URL` | Apna Koyeb public URL — self-ping ke liye |
 
-## 2. Local test (Cloud Shell)
+## 2. Bunny Storage Zone password kaha milega
+1. Bunny dashboard -> Stream -> apni library kholo.
+2. Library ke saath ek Storage Zone linked hoti hai (usually same naam jo
+   pull zone ka hai, e.g. `vz-4a69d144-b1a`).
+3. Bunny dashboard -> Storage -> wahi zone dhundo -> **FTP & API Access** ->
+   yaha se "Password" milega — yahi `BUNNY_STORAGE_PASSWORD` hai.
+4. Zone ka naam hi `BUNNY_STORAGE_ZONE_NAME` hai.
 
+## 3. Local test (Cloud Shell)
 ```bash
 pip install -r requirements.txt
 cp .env.example .env   # fill values
 python app.py
 ```
-
 App `http://localhost:8000` par khulega.
 
-## 3. Deploy on Koyeb (Docker)
+Bot alag se test karne ke liye:
+```bash
+python bot.py
+```
 
-1. Is folder ko GitHub repo me push karo (ya zip Koyeb me directly build karo).
-2. Koyeb dashboard → **Create Service** → **Docker** → apna repo/Dockerfile select karo.
-3. Port `8000` set karo.
-4. Step 1 wale saare environment variables Koyeb service settings me add karo.
-5. Deploy hone ke baad jo subdomain milega (e.g. `https://xxxx.koyeb.app`), usko
-   `SELF_URL` env var me daalkar service ko **redeploy** karo — isse self-ping
-   sahi URL par hit karega aur free tier sleep nahi hoga.
-6. Subdomain khol ke seedha upload UI dikhega — drag & drop ya "Choose Files"
-   / "Choose Folder" button se videos select karo.
+## 4. Deploy on Koyeb (Docker)
+
+**Web app:**
+1. Repo GitHub par push karo.
+2. Koyeb -> **Create Service** -> **Docker** -> repo select karo -> Dockerfile path `Dockerfile`.
+3. Port `8000`, saare env vars add karo.
+4. Deploy hone ke baad jo subdomain mile, usko `SELF_URL` me daalkar redeploy karo.
+
+**Telegram bot (alag service):**
+1. Same repo se dusri Koyeb service banao, Dockerfile path `Dockerfile.bot`.
+2. Same env vars + `TELEGRAM_API_ID`, `TELEGRAM_API_HASH`, `TELEGRAM_BOT_TOKEN` add karo.
+3. Port `8000` (sirf health check ke liye) + `SELF_URL` isi service ka subdomain.
 
 ## Notes / limitations
-- Job status in-memory rakha jaata hai — agar container restart ho gaya to
-  in-progress jobs ka status reset ho jaayega (video Bunny par safe rehta hai,
-  bas UI progress reset hoga).
-- Free tier par RAM/CPU limited hote hain, isliye bahut badi files (multi-GB)
-  ya bahut zyada parallel jobs slow ho sakte hain — `MAX_CONCURRENT_JOBS` ko
-  free tier ke resources ke hisaab se 1-2 hi rakhna better hai.
-- `BUNNY_PULL_ZONE_HOSTNAME` galat hoga to HLS download fail hoga — ye
-  Bunny Stream library settings me "Pull Zone" ke Hostname field se milta hai.
+- Job/history in-memory hai — container restart hone par UI history reset ho
+  jaayegi (Mongo record safe rehta hai, bas is-run ki UI history jaati hai).
+- `bot.py` Pyrogram (MTProto) use karta hai, standard Bot API nahi — isliye
+  bade video files (jo 20MB Bot-API-download-limit se bade hain) bhi download
+  ho paate hain.
+- Free tier par RAM/CPU limited — `MAX_CONCURRENT_JOBS` ko 1-2 hi rakho.
+- `INCLUDE_ORIGINAL_IN_R2=false` by default — Bunny zip me jo `original`
+  (raw uploaded) file hoti hai wo R2 me nahi jaati, storage bachane ke liye.
+  `true` set karke original bhi upload kar sakte ho.

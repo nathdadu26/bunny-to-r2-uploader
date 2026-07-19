@@ -12,7 +12,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY . .
 
-RUN mkdir -p /app/uploads /app/downloads
+RUN mkdir -p /app/uploads
 
 ENV PORT=8000
 EXPOSE 8000

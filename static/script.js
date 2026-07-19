@@ -9,11 +9,14 @@ const queueSummary = document.getElementById("queueSummary");
 
 const MAX_PARALLEL_UPLOADS = 2;
 const STAGE_LABELS = {
-  queued: "Queued",
+  uploading: "Uploading to server",
+  uploaded: "Uploaded ✓ (queued for processing)",
   uploading_bunny: "Uploading to Bunny",
   transcoding: "Transcoding",
-  downloading_hls: "Downloading HLS",
+  downloading: "Downloading processed files",
   uploading_r2: "Uploading to R2",
+  saving: "Saving record",
+  notifying: "Posting to channel",
   done: "Done",
   error: "Error",
 };
@@ -229,8 +232,8 @@ function uploadItem(clientId) {
 
     xhr.upload.addEventListener("progress", (e) => {
       if (e.lengthComputable) {
-        const pct = (e.loaded / e.total) * 10; // upload-to-server is 0-10% of overall bar
-        setItemStage(clientId, "uploading_bunny", pct);
+        const pct = (e.loaded / e.total) * 5; // upload-to-server is 0-5% of overall bar
+        setItemStage(clientId, "uploading", pct);
       }
     });
 
@@ -277,3 +280,52 @@ function pollStatus(clientId) {
   };
   tick();
 }
+
+/* ---------- history panel (all jobs, all sessions, survives refresh) ---------- */
+
+const historyList = document.getElementById("historyList");
+const historySummary = document.getElementById("historySummary");
+
+function renderHistory(jobs) {
+  historySummary.textContent = `${jobs.length} total`;
+  historyList.innerHTML = jobs
+    .map((j) => {
+      const stage = j.stage || "queued";
+      const stageClass = stage === "done" ? "done" : stage === "error" ? "error" : "";
+      const link = j.streaming_link
+        ? `<a href="${escapeHtml(j.streaming_link)}" target="_blank" rel="noopener">${escapeHtml(j.streaming_link)}</a>`
+        : "";
+      return `
+        <div class="item">
+          <div class="item-top">
+            <div>
+              <div class="item-name">${escapeHtml(j.original_name || j.title || "video")}</div>
+              <div class="item-path">${escapeHtml(j.relative_path || "")}</div>
+            </div>
+            <div class="item-stage ${stageClass}">${STAGE_LABELS[stage] || stage}</div>
+          </div>
+          <div class="bar-track"><div class="bar-fill ${stageClass}" style="width:${j.progress || 0}%"></div></div>
+          <div class="item-meta">
+            <span>${formatSize(j.size || 0)}</span>
+            <span>${j.progress || 0}%</span>
+          </div>
+          ${link ? `<div class="item-meta">${link}</div>` : ""}
+          ${j.error ? `<div class="item-error">${escapeHtml(j.error)}</div>` : ""}
+        </div>`;
+    })
+    .join("");
+}
+
+async function refreshHistory() {
+  try {
+    const resp = await fetch("/api/jobs");
+    if (!resp.ok) return;
+    const jobs = await resp.json();
+    renderHistory(jobs);
+  } catch (err) {
+    /* ignore transient failures, will retry on next tick */
+  }
+}
+
+refreshHistory();
+setInterval(refreshHistory, 4000);
