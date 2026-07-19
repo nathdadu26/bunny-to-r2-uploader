@@ -162,6 +162,13 @@ def get_video(mapping):
 
 register_health_check(app)
 
+# Run the Telegram bot (DM video intake) in the background thread of this
+# same process, so one Dockerfile/container serves both the web app and the
+# bot. No-ops with a log message if TELEGRAM_API_ID/HASH/BOT_TOKEN aren't set.
+import bot as telegram_bot  # noqa: E402  (import after app/env setup is intentional)
+
+telegram_bot.start_bot_background()
+
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", "8000"))
     app.run(host="0.0.0.0", port=port)

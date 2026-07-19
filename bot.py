@@ -22,6 +22,7 @@ app.py) so this can also be deployed as its own always-on Koyeb service.
 
 import os
 import uuid
+import time
 import asyncio
 import logging
 import threading
@@ -44,9 +45,16 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 UPLOAD_DIR = os.path.join(BASE_DIR, "uploads")
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 
-TELEGRAM_API_ID = int(os.environ.get("TELEGRAM_API_ID", "0"))
-TELEGRAM_API_HASH = os.environ.get("TELEGRAM_API_HASH", "")
-TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
+TELEGRAM_API_ID_RAW = os.environ.get("TELEGRAM_API_ID", "0").strip()
+try:
+    TELEGRAM_API_ID = int(TELEGRAM_API_ID_RAW)
+except ValueError:
+    raise SystemExit(
+        f"TELEGRAM_API_ID must be a plain number, got {TELEGRAM_API_ID_RAW!r}. "
+        "Get it from https://my.telegram.org -> API development tools."
+    )
+TELEGRAM_API_HASH = os.environ.get("TELEGRAM_API_HASH", "").strip()
+TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
 
 STAGE_LABELS = {
     "uploading_bunny": "⬆️ Uploading to Bunny Stream...",
@@ -70,9 +78,23 @@ bot = Client(
 
 @bot.on_message(filters.command("start") & filters.private)
 async def start_cmd(client, message: Message):
+    logger.info("Received /start from user_id=%s", message.from_user.id if message.from_user else "?")
     await message.reply_text(
         "Send me a video file and I'll upload it, transcode it, and give you a streaming link.\n"
         "Only video files are supported (no photos or GIFs)."
+    )
+
+
+@bot.on_message(filters.private, group=1)
+async def debug_log_all(client, message: Message):
+    # Runs after the more specific handlers above (group=1 = lower priority).
+    # Purely for debugging "bot not responding" — shows up in Koyeb logs
+    # even if no other handler matched the message.
+    logger.info(
+        "Incoming private message id=%s from=%s type=%s",
+        message.id,
+        message.from_user.id if message.from_user else "?",
+        message.media or "text",
     )
 
 
@@ -133,9 +155,53 @@ async def handle_video(client, message: Message):
         await status_msg.edit_text(f"❌ Failed: {exc}")
 
 
+def run_bot_blocking():
+    """Starts the bot and blocks forever (until the process exits). Safe to
+    call from any thread — deliberately avoids pyrogram.idle(), which
+    installs signal handlers and only works on the main thread."""
+    if not (TELEGRAM_API_ID and TELEGRAM_API_HASH and TELEGRAM_BOT_TOKEN):
+        logger.warning(
+            "TELEGRAM_API_ID / TELEGRAM_API_HASH / TELEGRAM_BOT_TOKEN not fully "
+            "configured — Telegram bot will not start (web app continues normally)."
+        )
+        return
+    try:
+        bot.start()
+        me = bot.get_me()
+        logger.info("Bot logged in successfully as @%s (id=%s)", me.username, me.id)
+        logger.info("Waiting for messages... send /start to @%s on Telegram", me.username)
+        while True:
+            time.sleep(3600)
+    except Exception:
+        logger.exception(
+            "Bot crashed — check TELEGRAM_API_ID / TELEGRAM_API_HASH / TELEGRAM_BOT_TOKEN"
+        )
+        raise
+    finally:
+        try:
+            bot.stop()
+        except Exception:  # noqa: BLE001
+            pass
+
+
+def start_bot_background():
+    """Starts the bot in a daemon thread. Used when app.py imports this
+    module so a single container/Dockerfile can serve the web app and the
+    Telegram bot together. Returns the thread, or None if not configured."""
+    if not (TELEGRAM_API_ID and TELEGRAM_API_HASH and TELEGRAM_BOT_TOKEN):
+        logger.info(
+            "Telegram bot not configured (TELEGRAM_API_ID/HASH/BOT_TOKEN not set) — skipping."
+        )
+        return None
+    t = threading.Thread(target=run_bot_blocking, daemon=True, name="telegram-bot")
+    t.start()
+    return t
+
+
 def _run_health_server():
-    """Minimal Flask app just for /health, /ping + the self-ping loop,
-    so this service can be deployed the same way as app.py on Koyeb."""
+    """Minimal Flask app just for /health, /ping + the self-ping loop, for
+    running bot.py as its own standalone process (not needed when it's
+    imported by app.py, which already exposes /health itself)."""
     health_app = Flask(__name__)
     register_health_check(health_app)
     port = int(os.environ.get("PORT", "8000"))
@@ -148,7 +214,6 @@ if __name__ == "__main__":
             "TELEGRAM_API_ID, TELEGRAM_API_HASH and TELEGRAM_BOT_TOKEN must all be set. "
             "Get api_id/api_hash from https://my.telegram.org and the bot token from @BotFather."
         )
-
     threading.Thread(target=_run_health_server, daemon=True).start()
-    logger.info("Starting Telegram bot...")
-    bot.run()
+    logger.info("Starting Telegram bot (standalone mode)...")
+    run_bot_blocking()

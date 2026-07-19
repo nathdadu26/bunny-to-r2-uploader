@@ -54,8 +54,7 @@ health_check.py         /health, /ping + self-ping background thread
 templates/index.html    Upload UI (queue + history)
 static/script.js        Drag/drop, folder traversal, XHR upload + polling + history panel
 static/style.css        Styling
-Dockerfile               Deploy app.py
-Dockerfile.bot           Deploy bot.py
+Dockerfile               Single image — runs BOTH the web app and the Telegram bot
 requirements.txt
 .env.example
 ```
@@ -97,18 +96,24 @@ Bot alag se test karne ke liye:
 python bot.py
 ```
 
-## 4. Deploy on Koyeb (Docker)
+## 4. Deploy on Koyeb (Docker) — ek hi service, app + bot dono
 
-**Web app:**
 1. Repo GitHub par push karo.
-2. Koyeb -> **Create Service** -> **Docker** -> repo select karo -> Dockerfile path `Dockerfile`.
-3. Port `8000`, saare env vars add karo.
+2. Koyeb -> **Create Service** -> **Docker** -> repo select karo -> Dockerfile path `Dockerfile` (yahi ek hai ab).
+3. Port `8000`, saare env vars add karo (Bunny/R2/Mongo/Telegram sab).
 4. Deploy hone ke baad jo subdomain mile, usko `SELF_URL` me daalkar redeploy karo.
 
-**Telegram bot (alag service):**
-1. Same repo se dusri Koyeb service banao, Dockerfile path `Dockerfile.bot`.
-2. Same env vars + `TELEGRAM_API_ID`, `TELEGRAM_API_HASH`, `TELEGRAM_BOT_TOKEN` add karo.
-3. Port `8000` (sirf health check ke liye) + `SELF_URL` isi service ka subdomain.
+Container start hote hi:
+- Flask web app `$PORT` par serve hota hai (upload UI, `/api/*`, `/health`, `/ping`)
+- Agar `TELEGRAM_API_ID` + `TELEGRAM_API_HASH` + `TELEGRAM_BOT_TOKEN` teeno set
+  hain, `bot.py` khud-ba-khud ek background thread me start ho jaata hai —
+  koi alag service/Dockerfile ki zaroorat nahi.
+- Agar ye teeno set nahi hain, bot bas start nahi hota (log me
+  "Telegram bot not configured — skipping" dikhega), web app normally chalta
+  rehta hai.
+
+Bot ko standalone test karna ho (bina web app ke) to `python bot.py` alag se
+chala sakte ho — us mode me wo apna khud ka `/health` bhi serve karta hai.
 
 ## Notes / limitations
 - Job/history in-memory hai — container restart hone par UI history reset ho
@@ -116,7 +121,9 @@ python bot.py
 - `bot.py` Pyrogram (MTProto) use karta hai, standard Bot API nahi — isliye
   bade video files (jo 20MB Bot-API-download-limit se bade hain) bhi download
   ho paate hain.
-- Free tier par RAM/CPU limited — `MAX_CONCURRENT_JOBS` ko 1-2 hi rakho.
+- Sirf ek gunicorn worker (`--workers 1`) rakhna zaroori hai — zyada workers
+  matlab bot thread multiple baar start hoga aur same bot token collide karega.
+- Free tier par RAM/CPU limited — `MAX_CONCURRENT_JOBS` ko 1-2 hi rakho. Bot bhi isi process me chalta hai, isliye heavy concurrent uploads + bot dono ek saath free tier par thoda dheema ho sakta hai.
 - `INCLUDE_ORIGINAL_IN_R2=false` by default — Bunny zip me jo `original`
   (raw uploaded) file hoti hai wo R2 me nahi jaati, storage bachane ke liye.
   `true` set karke original bhi upload kar sakte ho.
