@@ -22,7 +22,6 @@ app.py) so this can also be deployed as its own always-on Koyeb service.
 
 import os
 import uuid
-import time
 import asyncio
 import logging
 import threading
@@ -157,31 +156,39 @@ async def handle_video(client, message: Message):
 
 def run_bot_blocking():
     """Starts the bot and blocks forever (until the process exits). Safe to
-    call from any thread — deliberately avoids pyrogram.idle(), which
-    installs signal handlers and only works on the main thread."""
+    call from any thread.
+
+    IMPORTANT: this must keep pyrogram's asyncio event loop actively
+    pumping — a plain time.sleep() here would block the thread without
+    yielding to the loop, which stops pyrogram's background network/
+    dispatcher tasks from ever running (the connection looks "alive" but
+    no update ever gets dispatched to a handler). So we create a dedicated
+    event loop for this thread and keep it alive with an async wait
+    instead of pyrogram's idle() (which needs the main thread for signal
+    handlers and won't work from a background thread anyway)."""
     if not (TELEGRAM_API_ID and TELEGRAM_API_HASH and TELEGRAM_BOT_TOKEN):
         logger.warning(
             "TELEGRAM_API_ID / TELEGRAM_API_HASH / TELEGRAM_BOT_TOKEN not fully "
             "configured — Telegram bot will not start (web app continues normally)."
         )
         return
+
+    async def _runner():
+        async with bot:
+            me = await bot.get_me()
+            logger.info("Bot logged in successfully as @%s (id=%s)", me.username, me.id)
+            logger.info("Waiting for messages... send /start to @%s on Telegram", me.username)
+            await asyncio.Event().wait()  # never set -> keeps the loop alive/pumping forever
+
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
     try:
-        bot.start()
-        me = bot.get_me()
-        logger.info("Bot logged in successfully as @%s (id=%s)", me.username, me.id)
-        logger.info("Waiting for messages... send /start to @%s on Telegram", me.username)
-        while True:
-            time.sleep(3600)
+        loop.run_until_complete(_runner())
     except Exception:
         logger.exception(
             "Bot crashed — check TELEGRAM_API_ID / TELEGRAM_API_HASH / TELEGRAM_BOT_TOKEN"
         )
         raise
-    finally:
-        try:
-            bot.stop()
-        except Exception:  # noqa: BLE001
-            pass
 
 
 def start_bot_background():
