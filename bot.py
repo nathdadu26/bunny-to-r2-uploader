@@ -178,6 +178,24 @@ def run_bot_blocking():
             me = await bot.get_me()
             logger.info("Bot logged in successfully as @%s (id=%s)", me.username, me.id)
             logger.info("Waiting for messages... send /start to @%s on Telegram", me.username)
+
+            admin_chat_id = os.environ.get("TELEGRAM_ADMIN_CHAT_ID", "").strip()
+            if admin_chat_id:
+                try:
+                    await bot.send_message(
+                        int(admin_chat_id),
+                        f"✅ Bot restarted and is online as @{me.username}.\n"
+                        "If you're seeing this but /start still doesn't reply, "
+                        "sending works but receiving/dispatch is the problem.",
+                    )
+                    logger.info("Startup ping sent to TELEGRAM_ADMIN_CHAT_ID=%s", admin_chat_id)
+                except Exception:
+                    logger.exception(
+                        "Failed to send startup ping to TELEGRAM_ADMIN_CHAT_ID=%s "
+                        "(make sure that user has started a chat with the bot first)",
+                        admin_chat_id,
+                    )
+
             await asyncio.Event().wait()  # never set -> keeps the loop alive/pumping forever
 
     loop = asyncio.new_event_loop()
