@@ -1,0 +1,41 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Bunny → R2 Uploader</title>
+<link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+  <div class="wrap">
+    <header>
+      <h1>Bunny Stream → R2 Uploader</h1>
+      <p class="sub">Drop videos or a whole folder. Each file is uploaded to Bunny Stream, transcoded to HLS, then mirrored to Cloudflare R2.</p>
+    </header>
+
+    <div id="dropzone" class="dropzone">
+      <div class="dz-inner">
+        <div class="dz-icon">⬆</div>
+        <p><strong>Drag & drop</strong> video files or a folder here</p>
+        <p class="or">or</p>
+        <div class="dz-buttons">
+          <button type="button" id="btnPickFiles" class="btn">Choose Files</button>
+          <button type="button" id="btnPickFolder" class="btn btn-secondary">Choose Folder</button>
+        </div>
+      </div>
+      <input type="file" id="fileInput" multiple accept="video/*" hidden>
+      <input type="file" id="folderInput" webkitdirectory directory multiple hidden>
+    </div>
+
+    <div id="queueSection" class="queue-section" hidden>
+      <div class="queue-header">
+        <h2>Uploads</h2>
+        <span id="queueSummary" class="summary"></span>
+      </div>
+      <div id="queueList" class="queue-list"></div>
+    </div>
+  </div>
+
+  <script src="{{ url_for('static', filename='script.js') }}"></script>
+</body>
+</html>
