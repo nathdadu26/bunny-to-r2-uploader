@@ -18,6 +18,17 @@ Behaviour (per spec):
 
 A tiny Flask health endpoint runs alongside it (same health_check.py used by
 app.py) so this can also be deployed as its own always-on Koyeb service.
+
+IMPORTANT (why the Client is built lazily inside run_bot_blocking, not at
+module import time): Pyrogram's internal Dispatcher captures
+`asyncio.get_event_loop()` the moment a `Client(...)` object is constructed
+(see pyrogram/dispatcher.py). If the Client were built at module import time
+(main thread, gunicorn worker startup) but actually run later on a different
+event loop created inside a background thread, the Dispatcher's handler
+worker tasks get scheduled on the WRONG (never-pumped) loop — the bot logs
+in fine, can send messages, but never dispatches received updates to any
+handler. So the Client (and its handler registration) must happen inside
+the same thread/loop that will actually run it.
 """
 
 import os
@@ -66,16 +77,13 @@ STAGE_LABELS = {
     "error": "❌ Failed",
 }
 
-bot = Client(
-    "bunny_r2_bot",
-    api_id=TELEGRAM_API_ID,
-    api_hash=TELEGRAM_API_HASH,
-    bot_token=TELEGRAM_BOT_TOKEN,
-    workdir=BASE_DIR,
-)
 
+# --- Handlers are plain (undecorated) coroutines. They're attached to the
+# Client instance inside run_bot_blocking(), after that Client is built on
+# the correct event loop. Each receives `client` as its first arg (the
+# Client instance pyrogram passes in) — never reach for a module-level
+# `bot` variable here. ---
 
-@bot.on_message(filters.command("start") & filters.private)
 async def start_cmd(client, message: Message):
     logger.info("Received /start from user_id=%s", message.from_user.id if message.from_user else "?")
     await message.reply_text(
@@ -84,7 +92,6 @@ async def start_cmd(client, message: Message):
     )
 
 
-@bot.on_message(filters.private, group=1)
 async def debug_log_all(client, message: Message):
     # Runs after the more specific handlers above (group=1 = lower priority).
     # Purely for debugging "bot not responding" — shows up in Koyeb logs
@@ -97,12 +104,10 @@ async def debug_log_all(client, message: Message):
     )
 
 
-@bot.on_message((filters.photo | filters.animation) & filters.private)
 async def reject_non_video(client, message: Message):
     await message.reply_text("Only video files are supported — please send a video.")
 
 
-@bot.on_message(filters.video & filters.private)
 async def handle_video(client, message: Message):
     loop = asyncio.get_event_loop()
     status_msg = await message.reply_text("⬇️ Downloading from Telegram...")
@@ -154,18 +159,32 @@ async def handle_video(client, message: Message):
         await status_msg.edit_text(f"❌ Failed: {exc}")
 
 
+def _build_client_and_register_handlers():
+    """Constructs the Pyrogram Client and attaches all handlers. Must be
+    called from inside the thread (and after the event loop) that will
+    actually run it — see the module docstring for why."""
+    client = Client(
+        "bunny_r2_bot",
+        api_id=TELEGRAM_API_ID,
+        api_hash=TELEGRAM_API_HASH,
+        bot_token=TELEGRAM_BOT_TOKEN,
+        workdir=BASE_DIR,
+    )
+    client.on_message(filters.command("start") & filters.private)(start_cmd)
+    client.on_message(filters.private, group=1)(debug_log_all)
+    client.on_message((filters.photo | filters.animation) & filters.private)(reject_non_video)
+    client.on_message(filters.video & filters.private)(handle_video)
+    return client
+
+
 def run_bot_blocking():
     """Starts the bot and blocks forever (until the process exits). Safe to
     call from any thread.
 
-    IMPORTANT: this must keep pyrogram's asyncio event loop actively
-    pumping — a plain time.sleep() here would block the thread without
-    yielding to the loop, which stops pyrogram's background network/
-    dispatcher tasks from ever running (the connection looks "alive" but
-    no update ever gets dispatched to a handler). So we create a dedicated
-    event loop for this thread and keep it alive with an async wait
-    instead of pyrogram's idle() (which needs the main thread for signal
-    handlers and won't work from a background thread anyway)."""
+    Creates its OWN dedicated event loop (and the Client on it — see module
+    docstring) and keeps it alive with an async wait instead of pyrogram's
+    idle() (which needs the main thread for signal handlers and won't work
+    from a background thread anyway)."""
     if not (TELEGRAM_API_ID and TELEGRAM_API_HASH and TELEGRAM_BOT_TOKEN):
         logger.warning(
             "TELEGRAM_API_ID / TELEGRAM_API_HASH / TELEGRAM_BOT_TOKEN not fully "
@@ -173,20 +192,25 @@ def run_bot_blocking():
         )
         return
 
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+
+    # Built AFTER the loop above is set as this thread's loop, so
+    # pyrogram's Dispatcher captures the loop that's actually going to run.
+    client = _build_client_and_register_handlers()
+
     async def _runner():
-        async with bot:
-            me = await bot.get_me()
+        async with client:
+            me = await client.get_me()
             logger.info("Bot logged in successfully as @%s (id=%s)", me.username, me.id)
             logger.info("Waiting for messages... send /start to @%s on Telegram", me.username)
 
             admin_chat_id = os.environ.get("TELEGRAM_ADMIN_CHAT_ID", "").strip()
             if admin_chat_id:
                 try:
-                    await bot.send_message(
+                    await client.send_message(
                         int(admin_chat_id),
-                        f"✅ Bot restarted and is online as @{me.username}.\n"
-                        "If you're seeing this but /start still doesn't reply, "
-                        "sending works but receiving/dispatch is the problem.",
+                        f"✅ Bot restarted and is online as @{me.username}.",
                     )
                     logger.info("Startup ping sent to TELEGRAM_ADMIN_CHAT_ID=%s", admin_chat_id)
                 except Exception:
@@ -198,8 +222,6 @@ def run_bot_blocking():
 
             await asyncio.Event().wait()  # never set -> keeps the loop alive/pumping forever
 
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
     try:
         loop.run_until_complete(_runner())
     except Exception:
