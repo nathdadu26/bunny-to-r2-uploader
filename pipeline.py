@@ -13,6 +13,7 @@ import os
 import re
 import shutil
 import logging
+from datetime import datetime
 
 import bunny_client
 import bunny_storage_zip
@@ -27,6 +28,13 @@ DELETE_FROM_BUNNY_AFTER_SUCCESS = os.environ.get("DELETE_FROM_BUNNY_AFTER_SUCCES
 INCLUDE_ORIGINAL_IN_R2 = os.environ.get("INCLUDE_ORIGINAL_IN_R2", "false").lower() == "true"
 R2_KEY_PREFIX = os.environ.get("R2_KEY_PREFIX", "").strip().strip("/")
 
+# Every file gets renamed to this format before it's uploaded to Bunny,
+# regardless of whether it came from the web uploader or the Telegram bot:
+#   {FILENAME_PREFIX}{timestamp}{original extension}
+# e.g. TG_@atoz_links_VID_19072026143205.mp4
+FILENAME_PREFIX = os.environ.get("FILENAME_PREFIX", "TG_@atoz_links_VID_")
+FILENAME_TIMESTAMP_FORMAT = os.environ.get("FILENAME_TIMESTAMP_FORMAT", "%d%m%Y%H%M%S")
+
 MP4_RE = re.compile(r"^play_(\d+)p\.mp4$")
 
 
@@ -38,8 +46,21 @@ def _noop(*args, **kwargs):
     pass
 
 
+def generate_upload_name(original_name):
+    """Renames every incoming file to a consistent format before it's sent
+    to Bunny: {FILENAME_PREFIX}{timestamp}{original extension}."""
+    ext = os.path.splitext(original_name or "")[1]
+    timestamp = datetime.now().strftime(FILENAME_TIMESTAMP_FORMAT)
+    return f"{FILENAME_PREFIX}{timestamp}{ext}"
+
+
 def process_video(local_path, title, source="web", work_dir=None, on_stage=None, extra_meta=None):
     """Runs the full migration for one already-downloaded-to-disk video file.
+
+    `title` is the original filename as received (from the web upload or
+    the Telegram DM) — it gets renamed via generate_upload_name() before
+    being used as the Bunny video title / Mongo record title. The original
+    is kept in the saved record as `original_filename`.
 
     on_stage(stage: str, progress: int) is called as the job advances; stage
     is one of: uploading_bunny, transcoding, downloading, uploading_r2,
@@ -53,10 +74,13 @@ def process_video(local_path, title, source="web", work_dir=None, on_stage=None,
     work_dir = work_dir or (local_path + "_work")
     size = os.path.getsize(local_path)
 
+    original_filename = title
+    upload_name = generate_upload_name(original_filename)
+
     try:
-        # 1. Create + upload to Bunny Stream
+        # 1. Create + upload to Bunny Stream (under the renamed filename)
         on_stage("uploading_bunny", 10)
-        video_id = bunny_client.create_video(title)
+        video_id = bunny_client.create_video(upload_name)
 
         def on_upload_progress(pct, read, total):
             on_stage("uploading_bunny", 10 + int(pct * 0.20))
@@ -117,7 +141,8 @@ def process_video(local_path, title, source="web", work_dir=None, on_stage=None,
         record = {
             "mapping": mapping,
             "bunny_video_id": video_id,
-            "title": title,
+            "title": upload_name,
+            "original_filename": original_filename,
             "size": size,
             "source": source,
             "r2_prefix": r2_prefix,
@@ -133,7 +158,7 @@ def process_video(local_path, title, source="web", work_dir=None, on_stage=None,
         # 6. Post thumbnail to the Telegram channel (best-effort)
         on_stage("notifying", 96)
         if record["thumbnail_url"]:
-            telegram_notify.post_thumbnail_to_channel(record["thumbnail_url"], title, mapping)
+            telegram_notify.post_thumbnail_to_channel(record["thumbnail_url"], upload_name, mapping)
 
         if DELETE_FROM_BUNNY_AFTER_SUCCESS:
             try:

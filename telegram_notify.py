@@ -1,7 +1,7 @@
 """
 telegram_notify.py
 Posts a video's thumbnail to a Telegram channel once it's live, with a
-caption containing the streaming link (STREAMING_LINK_BASE/{mapping}).
+caption that's just the player URL: {TELEGRAM_CAPTION_TEMPLATE}/{mapping}.
 Uses plain Bot API HTTP calls (no bot framework needed for this one-way post).
 """
 
@@ -14,7 +14,9 @@ logger = logging.getLogger("telegram_notify")
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
 TELEGRAM_CHANNEL_ID = os.environ.get("TELEGRAM_CHANNEL_ID", "")  # e.g. @mychannel or -100xxxxxxxxxx
 STREAMING_LINK_BASE = os.environ.get("STREAMING_LINK_BASE", "").rstrip("/")
-CAPTION_TEMPLATE = os.environ.get("TELEGRAM_CAPTION_TEMPLATE", "{title}\n\n{link}")
+# Player domain used specifically for the channel post caption, e.g.
+# "https://domain.com" -> caption becomes "https://domain.com/{mapping}"
+PLAYER_DOMAIN = os.environ.get("TELEGRAM_CAPTION_TEMPLATE", "").rstrip("/")
 
 API_BASE = "https://api.telegram.org"
 
@@ -32,8 +34,7 @@ def post_thumbnail_to_channel(thumbnail_url, title, mapping):
         logger.info("Telegram channel posting not configured, skipping")
         return False
 
-    link = build_streaming_link(mapping)
-    caption = CAPTION_TEMPLATE.format(title=title, link=link)
+    caption = f"{PLAYER_DOMAIN}/{mapping}" if PLAYER_DOMAIN else mapping
 
     url = f"{API_BASE}/bot{TELEGRAM_BOT_TOKEN}/sendPhoto"
     try:
